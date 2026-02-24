@@ -1,50 +1,72 @@
-import { openai } from "@/config/OpenAiModel"
-import { AIDoctorAgents } from "@/shared/list"
-import { NextRequest, NextResponse } from "next/server"
+import { NextResponse } from "next/server";
+import { AIDoctorAgents } from "@/shared/list";
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const { notes } = await req.json()
+    const body = await req.json();
+    const notes: string = body?.notes ?? "";
 
-    if (!notes) {
-      return NextResponse.json([])
+    // 🔹 If user sends empty input → show default doctors
+    if (!notes || typeof notes !== "string") {
+      return NextResponse.json(AIDoctorAgents.slice(0, 3));
     }
 
-    const completion = await openai.chat.completions.create({
-      model: "openai/gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `
-Return ONLY a JSON ARRAY.
-No text. No markdown.
-Doctors:
-${JSON.stringify(AIDoctorAgents)}
-          `,
-        },
-        {
-          role: "user",
-          content: `Symptoms: ${notes}`,
-        },
-      ],
-      temperature: 0,
-    })
+    const query = notes.toLowerCase();
 
-    let raw = completion.choices?.[0]?.message?.content ?? "[]"
+    // Split sentence into searchable tokens
+    const words = query
+      .replace(/[^\w\s]/g, "") // remove punctuation
+      .split(/\s+/)
+      .filter(Boolean);
 
-    raw = raw.replace(/```json/gi, "").replace(/```/g, "").trim()
+    /**
+     * 🧠 Score each doctor by keyword matches
+     * Instead of simple filter, we rank them
+     */
+    const scoredDoctors = AIDoctorAgents.map((agent: any) => {
+      const keywords: string[] = agent.keywords || [];
 
-    let doctors = []
-    try {
-      const parsed = JSON.parse(raw)
-      doctors = Array.isArray(parsed) ? parsed : []
-    } catch {
-      doctors = []
-    }
+      let score = 0;
 
-    return NextResponse.json(doctors)
-  } catch (err) {
-    console.error("Suggest doctors error:", err)
-    return NextResponse.json([])
+      keywords.forEach((keyword) => {
+        const lowerKeyword = keyword.toLowerCase();
+
+        // exact phrase match
+        if (query.includes(lowerKeyword)) score += 3;
+
+        // word match
+        words.forEach((word) => {
+          if (lowerKeyword.includes(word)) score += 1;
+        });
+      });
+
+      return { ...agent, score };
+    });
+
+    /**
+     * 🔹 Sort by relevance score
+     */
+    const sorted = scoredDoctors
+      .filter((d) => d.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map(({ score, ...doctor }) => doctor);
+
+    /**
+     * 🔹 If nothing matched → fallback doctors
+     */
+    const result =
+      sorted.length > 0
+        ? sorted.slice(0, 3)
+        : [
+            AIDoctorAgents[0], // General Physician fallback
+            ...AIDoctorAgents.slice(1, 3),
+          ];
+
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error("Suggest doctors error:", error);
+
+    // 🔹 Never return empty → keeps UI alive
+    return NextResponse.json(AIDoctorAgents.slice(0, 3));
   }
 }
